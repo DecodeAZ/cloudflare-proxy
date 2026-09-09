@@ -108,6 +108,60 @@ function wrapResponse(upstream) {
 }
 
 // ============================================================
+// 边缘缓存策略（通过响应 Cache-Control 让 Cloudflare 边缘缓存）
+// ============================================================
+
+/**
+ * 根据上游 URL 判断可缓存性，返回 Cache-Control 值；不可缓存返回 null。
+ * 仅对 2xx GET 响应设置。注意：
+ * - 只改 Cache-Control，不改内容类型等；
+ * - 重定向链最终取到字节的那一跳会命中其真实 URL 的判断
+ *   （Docker blob 经 S3 302 后路径里仍含 /blobs/sha256:）。
+ */
+function cacheControlFor(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  const host = u.hostname;
+  const path = u.pathname;
+
+  // Docker blob：sha256 寻址、内容不可变 → 强缓存 7 天
+  if (/\/blobs\/sha256:[0-9a-f]{64}$/.test(path) || /\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}\/data$/.test(path)) {
+    return 'public, max-age=604800, immutable';
+  }
+  // GitHub raw / gist 原始文件 → 1 小时
+  if (host === 'raw.githubusercontent.com' || host === 'gist.githubusercontent.com') {
+    return 'public, max-age=3600';
+  }
+  // GitHub archive（tar/zip）与 release 附件、codeload → 1 小时
+  if (host === 'codeload.github.com' || /\/releases\/download\//.test(path) || /\/archive\/.+\.(tar\.gz|tgz|zip)$/.test(path)) {
+    return 'public, max-age=3600';
+  }
+  return null;
+}
+
+/** 包装响应；若该 URL 内容可缓存且返回 2xx，则加上边缘缓存头 */
+function withCache(resp, url) {
+  const wrapped = wrapResponse(resp);
+  if (resp.status >= 200 && resp.status < 300) {
+    const cc = cacheControlFor(url);
+    if (cc) wrapped.headers.set('Cache-Control', cc);
+  }
+  return wrapped;
+}
+
+// ============================================================
+// 防滥用
+// ============================================================
+
+/** 常见扫描器/爬虫 UA（不拦截 curl/wget/git/docker 等正常客户端） */
+const BLOCKED_UAS = /(?:zgrab|masscan|nuclei|sqlmap|netcraft|nmap|censys|scanner|paloaltonetworks|netdatasysteme)/i;
+
+/** 拦截枚举类接口，防止被索引/刷量 */
+function isBlockedPath(pathname) {
+  return pathname === '/v2/_catalog' || /^\/https?:\/\/[^/]+\/v2\/_catalog/i.test(pathname);
+}
+
+// ============================================================
 // Docker Auth Token
 // ============================================================
 
@@ -192,11 +246,11 @@ async function proxyWithAuth(targetUrl, request, isDocker, redirectCount = 0) {
           return proxyWithAuth(new URL(nextLocation, redirUrl).href, request, isDocker, redirectCount + 1);
         }
       }
-      return wrapResponse(redirResp);
+      return withCache(redirResp, redirUrl);
     }
   }
 
-  return wrapResponse(upstream);
+  return withCache(upstream, targetUrl);
 }
 
 // ============================================================
@@ -242,6 +296,14 @@ export default {
     const { pathname, search } = url;
 
     if (request.method === 'OPTIONS') return corsPreflight();
+
+    // —— 防滥用：扫描器 UA 与枚举接口 ——
+    if (BLOCKED_UAS.test(request.headers.get('User-Agent') || '')) {
+      return new Response('Forbidden\n', { status: 403 });
+    }
+    if (isBlockedPath(pathname)) {
+      return new Response('Forbidden\n', { status: 403 });
+    }
 
     // —— Docker 路径 ——
     const docker = parseDockerPath(pathname, search);
