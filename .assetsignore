@@ -1,1 +1,5 @@
 _worker.js
+.git
+.wrangler
+.github
+*.tmp
