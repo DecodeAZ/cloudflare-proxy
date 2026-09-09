@@ -168,27 +168,28 @@ async function proxyWithAuth(targetUrl, request, isDocker, redirectCount = 0) {
     return wrapResponse(upstream);
   }
 
-  // ===== S3 / CDN 重定向 → 重新代理 =====
-  if (upstream.status === 302 || upstream.status === 307) {
+  // ===== S3 / CDN / GitHub 重定向 → 重新代理（含 301/308，git clone 常见）=====
+  if ([301, 302, 303, 307, 308].includes(upstream.status)) {
     const location = upstream.headers.get('Location');
     if (location) {
-      const redirHeaders = buildReqHeaders(request, location);
+      const redirUrl = new URL(location, targetUrl).href;
+      const redirHeaders = buildReqHeaders(request, redirUrl);
       // 带回上游给的 Authorization（如果有的话）
       const upstreamAuth = upstream.headers.get('Authorization');
       if (upstreamAuth) redirHeaders.set('Authorization', upstreamAuth);
 
-      const redirResp = await fetch(location, {
+      const redirResp = await fetch(redirUrl, {
         method: request.method,
         headers: redirHeaders,
-        body: request.body,
+        body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
         redirect: 'manual',
       });
 
       // 如果还是重定向，递归
-      if (redirResp.status === 302 || redirResp.status === 307) {
+      if ([301, 302, 303, 307, 308].includes(redirResp.status)) {
         const nextLocation = redirResp.headers.get('Location');
         if (nextLocation) {
-          return proxyWithAuth(nextLocation, request, isDocker, redirectCount + 1);
+          return proxyWithAuth(new URL(nextLocation, redirUrl).href, request, isDocker, redirectCount + 1);
         }
       }
       return wrapResponse(redirResp);
@@ -249,8 +250,11 @@ export default {
     }
 
     // —— 通用 URL 代理 (/https://github.com/...) ——
-    if (/^\/https?:\/\//.test(pathname)) {
-      const targetUrl = pathname.slice(1) + (search || '');
+    // 注意：Cloudflare 边缘会对 URL 做规范化，把路径里的 "//" 折叠成 "/"，
+    // Worker 实际可能收到 /https:/github.com/...，这里用 \/+ 同时兼容两种形态
+    const protoMatch = pathname.match(/^\/(https?):\/+(.+)$/i);
+    if (protoMatch) {
+      const targetUrl = `${protoMatch[1].toLowerCase()}://${protoMatch[2]}${search || ''}`;
       // 目标域名不在白名单里就拒绝
       try {
         const targetHost = new URL(targetUrl).hostname;
