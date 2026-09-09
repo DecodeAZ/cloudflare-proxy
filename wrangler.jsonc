@@ -1,0 +1,11 @@
+{
+  // Cloudflare Workers 项目配置（本项目为 Workers 静态资源类型，非 Pages）
+  // name 必须与控制台中的 Worker 名称一致
+  "name": "cloudflare-proxy",
+  "main": "_worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./",
+    "binding": "ASSETS"
+  }
+}
