@@ -4,28 +4,53 @@
  */
 
 /**
- * Replace all instances of 'cloudflare-proxy-6rw.pages.dev' in text nodes and code blocks
- * with the configured domain from config.js.
+ * Replace the 'your-domain.com' placeholder in text nodes, element attributes,
+ * and JSON-LD blocks with the domain configured in config.js.
+ * The domain is read ONLY from config.js — no hardcoded default.
  */
 function applyDomain() {
-  var domain = (window.CF_PROXY && window.CF_PROXY.DOMAIN) || 'cloudflare-proxy-6rw.pages.dev';
-  if (domain === 'cloudflare-proxy-6rw.pages.dev') return;
+  var domain = (window.CF_PROXY && window.CF_PROXY.DOMAIN) || '';
+  if (!domain) return;
 
-  function replaceText(node) {
+  var placeholder = 'your-domain.com';
+
+  function swap(text) {
+    return text.split(placeholder).join(domain);
+  }
+
+  function walk(node) {
     if (node.nodeType === 3) {
-      // Text node
-      if (node.textContent.indexOf('cloudflare-proxy-6rw.pages.dev') !== -1) {
-        node.textContent = node.textContent.replace(/your-domain\.com/g, domain);
+      // 文本节点
+      if (node.textContent.indexOf(placeholder) !== -1) {
+        node.textContent = swap(node.textContent);
       }
-    } else if (node.nodeType === 1) {
-      // Element node — skip <script> and <style>
-      if (node.tagName === 'SCRIPT' || node.tagName === 'STYLE') return;
-      for (var i = 0; i < node.childNodes.length; i++) {
-        replaceText(node.childNodes[i]);
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    // 跳过 script / style
+    if (node.tagName === 'SCRIPT' || node.tagName === 'STYLE') return;
+
+    // 元素属性（canonical / og:url / og:image 等）
+    for (var i = 0; i < node.attributes.length; i++) {
+      var attr = node.attributes[i];
+      if (attr.value.indexOf(placeholder) !== -1) {
+        attr.value = swap(attr.value);
       }
     }
+    for (var j = 0; j < node.childNodes.length; j++) {
+      walk(node.childNodes[j]);
+    }
   }
-  replaceText(document.body);
+
+  walk(document.head);
+  walk(document.body);
+
+  // JSON-LD 中的 url（script 节点不进入上面的遍历，单独处理）
+  document.querySelectorAll('script[type="application/ld+json"]').forEach(function (s) {
+    if (s.textContent.indexOf(placeholder) !== -1) {
+      s.textContent = swap(s.textContent);
+    }
+  });
 }
 
 /**
