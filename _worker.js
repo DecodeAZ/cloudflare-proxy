@@ -149,6 +149,37 @@ function withCache(resp, url) {
   return wrapped;
 }
 
+/**
+ * Worker 层缓存：对不可变内容用 caches.default 直接命中，
+ * 不依赖控制台 Cache Rules（命中后完全不再回源）。
+ * 仅缓存 GET、无 Range 头、且 cacheControlFor 判定可缓存的 URL。
+ */
+async function serveCached(request, ctx, targetUrl, isDocker) {
+  const cc = cacheControlFor(targetUrl);
+  const useCache = !!cc && request.method === 'GET' && !request.headers.has('Range');
+  if (!useCache) return proxyWithAuth(targetUrl, request, isDocker);
+
+  const cache = caches.default;
+  // 缓存键只按 URL（内容按 sha256/tag 寻址，与请求头无关）
+  const key = new Request(request.url, { method: 'GET' });
+
+  const hit = await cache.match(key);
+  if (hit) {
+    const h = new Headers(hit.headers);
+    h.set('X-CF-Worker-Cache', 'HIT');
+    return new Response(hit.body, { status: hit.status, statusText: hit.statusText, headers: h });
+  }
+
+  const resp = await proxyWithAuth(targetUrl, request, isDocker);
+  if (resp.status === 200) {
+    const forCache = resp.clone();
+    forCache.headers.set('X-CF-Worker-Cache', 'HIT'); // 存入副本带标记，便于观测命中
+    ctx.waitUntil(cache.put(key, forCache));
+    resp.headers.set('X-CF-Worker-Cache', 'MISS');
+  }
+  return resp;
+}
+
 // ============================================================
 // 防滥用
 // ============================================================
@@ -308,7 +339,7 @@ export default {
     // —— Docker 路径 ——
     const docker = parseDockerPath(pathname, search);
     if (docker) {
-      return proxyWithAuth(docker.targetUrl, request, docker.isDocker);
+      return serveCached(request, ctx, docker.targetUrl, docker.isDocker);
     }
 
     // —— 通用 URL 代理 (/https://github.com/...) ——
@@ -326,7 +357,7 @@ export default {
       } catch {
         return new Response('Error: invalid target URL.\n', { status: 400 });
       }
-      return proxyWithAuth(targetUrl, request, false);
+      return serveCached(request, ctx, targetUrl, false);
     }
 
     // —— 静态资源 ——
