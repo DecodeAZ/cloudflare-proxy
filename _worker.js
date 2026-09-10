@@ -20,6 +20,8 @@ const ALLOWED_HOSTS = [
   'gist.github.com', 'gist.githubusercontent.com',
   'quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io',
   'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io',
+  // Docker 认证服务器：改写 401 挑战的 realm 后，客户端 token 请求也走本代理
+  'auth.docker.io', 'production.cloudflare.docker.com',
 ];
 
 const DOCKER_REGISTRIES = new Set([
@@ -196,22 +198,52 @@ function isBlockedPath(pathname) {
 // Docker Auth Token
 // ============================================================
 
-/** 解析 WWW-Authenticate 并拿 token */
-async function fetchDockerToken(wwwAuth) {
-  const m = wwwAuth.match(/Bearer realm="([^"]+?)",service="([^"]*?)",scope="([^"]*?)"/);
-  if (!m) return null;
+/** 解析 WWW-Authenticate 并拿 token（各属性独立解析，不依赖顺序） */
+async function fetchDockerToken(wwwAuth, request) {
+  const realm = wwwAuth.match(/realm="([^"]+)"/)?.[1];
+  if (!realm) return null;
+  const service = wwwAuth.match(/service="([^"]*)"/)?.[1] || 'registry.docker.io';
+  const scope = wwwAuth.match(/scope="([^"]*)"/)?.[1] || '';
 
-  const [, realm, service, scope] = m;
-  const tokenUrl = `${realm}?service=${service}&scope=${encodeURIComponent(scope)}`;
+  const tokenUrl = new URL(realm);
+  tokenUrl.searchParams.set('service', service);
+  if (scope) tokenUrl.searchParams.set('scope', scope);
+
+  // 透传客户端 Basic 凭据（docker login 本域名后），让用户用自己的 Docker Hub 配额
+  const headers = { Accept: 'application/json' };
+  const auth = request?.headers.get('Authorization');
+  if (auth && /^Basic /i.test(auth)) headers.Authorization = auth;
 
   try {
-    const res = await fetch(tokenUrl, { headers: { Accept: 'application/json' } });
+    const res = await fetch(tokenUrl.href, { headers });
     if (!res.ok) return null;
     const data = await res.json();
     return data.token || data.access_token || null;
   } catch {
     return null;
   }
+}
+
+/**
+ * 把 401 挑战里的 realm 改写为本代理域名（/https://<auth主机><路径>），
+ * 否则客户端会直连 auth.docker.io 等认证服务器——国内直连会超时。
+ */
+function rewriteAuthChallenge(resp, request) {
+  const www = resp.headers.get('WWW-Authenticate');
+  if (!www) return resp;
+  let rewritten;
+  try {
+    const origin = new URL(request.url).origin;
+    rewritten = www.replace(/realm="([^"]+)"/, (_, realm) => {
+      const u = new URL(realm);
+      return `realm="${origin}/https://${u.host}${u.pathname}"`;
+    });
+  } catch {
+    return resp;
+  }
+  const h = new Headers(resp.headers);
+  h.set('WWW-Authenticate', rewritten);
+  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 
 // ============================================================
@@ -236,7 +268,7 @@ async function proxyWithAuth(targetUrl, request, isDocker, redirectCount = 0) {
   if (isDocker && upstream.status === 401) {
     const wwwAuth = upstream.headers.get('WWW-Authenticate');
     if (wwwAuth) {
-      const token = await fetchDockerToken(wwwAuth);
+      const token = await fetchDockerToken(wwwAuth, request);
       if (token) {
         const authHeaders = buildReqHeaders(request, targetUrl);
         authHeaders.set('Authorization', `Bearer ${token}`);
@@ -246,11 +278,13 @@ async function proxyWithAuth(targetUrl, request, isDocker, redirectCount = 0) {
           body: request.body,
           redirect: 'manual',
         });
+        // 重试仍 401：改写挑战 realm 走本代理，避免客户端直连认证服务器
+        if (retry.status === 401) return rewriteAuthChallenge(wrapResponse(retry), request);
         return retry;
       }
     }
-    // token 拿不到就原样返回 401
-    return wrapResponse(upstream);
+    // token 拿不到：返回 401，但把 realm 改写为走本代理
+    return rewriteAuthChallenge(wrapResponse(upstream), request);
   }
 
   // ===== S3 / CDN / GitHub 重定向 → 重新代理（含 301/308，git clone 常见）=====
