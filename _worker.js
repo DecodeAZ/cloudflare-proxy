@@ -280,11 +280,31 @@ async function proxyWithAuth(targetUrl, request, isDocker, redirectCount = 0) {
         });
         // 重试仍 401：改写挑战 realm 走本代理，避免客户端直连认证服务器
         if (retry.status === 401) return rewriteAuthChallenge(wrapResponse(retry), request);
+        // 匿名配额耗尽（429）：返回 401 挑战，促使客户端带登录凭据重试，
+        // 避免 daemon 静默回退到被墙的 registry-1.docker.io
+        if (retry.status === 429 && !request.headers.has('Authorization')) {
+          return rewriteAuthChallenge(wrapResponse(upstream), request);
+        }
         return retry;
       }
     }
     // token 拿不到：返回 401，但把 realm 改写为走本代理
     return rewriteAuthChallenge(wrapResponse(upstream), request);
+  }
+
+  // ===== Docker 匿名配额直接 429（无前置 401）→ 合成 401 挑战引导登录 =====
+  if (isDocker && upstream.status === 429 && !request.headers.has('Authorization')) {
+    const mRepo = new URL(targetUrl).pathname.match(/^\/v2\/(.+?)\/(?:manifests|blobs)\//);
+    if (mRepo) {
+      const origin = new URL(request.url).origin;
+      return new Response('{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}', {
+        status: 401,
+        headers: {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': `Bearer realm="${origin}/https://auth.docker.io/token",service="registry.docker.io",scope="repository:${mRepo[1]}:pull"`,
+        },
+      });
+    }
   }
 
   // ===== S3 / CDN / GitHub 重定向 → 重新代理（含 301/308，git clone 常见）=====
