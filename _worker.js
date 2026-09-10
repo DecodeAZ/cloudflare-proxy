@@ -225,8 +225,10 @@ async function fetchDockerToken(wwwAuth, request) {
 }
 
 /**
- * 把 401 挑战里的 realm 改写为本代理域名（/https://<auth主机><路径>），
- * 否则客户端会直连 auth.docker.io 等认证服务器——国内直连会超时。
+ * 把 401 挑战里的 realm 改写为本代理域名下的纯路径 /v2/auth，
+ * 否则客户端会直连 auth.docker.io——国内直连会超时。
+ * realm 必须是纯路径形式（不用 /https://host 嵌套），daemon 对嵌套 URL 的
+ * realm 解析兼容性差，会导致认证流程中断（收到挑战后不去取 token）。
  */
 function rewriteAuthChallenge(resp, request) {
   const www = resp.headers.get('WWW-Authenticate');
@@ -236,7 +238,11 @@ function rewriteAuthChallenge(resp, request) {
     const origin = new URL(request.url).origin;
     rewritten = www.replace(/realm="([^"]+)"/, (_, realm) => {
       const u = new URL(realm);
-      return `realm="${origin}/https://${u.host}${u.pathname}"`;
+      if (u.host === 'auth.docker.io') {
+        return `realm="${origin}/v2/auth"`;
+      }
+      // 其他 registry（ghcr.io 等）的 token 端点保持原样
+      return _;
     });
   } catch {
     return resp;
@@ -301,7 +307,7 @@ async function proxyWithAuth(targetUrl, request, isDocker, redirectCount = 0) {
         status: 401,
         headers: {
           'Content-Type': 'application/json',
-          'WWW-Authenticate': `Bearer realm="${origin}/https://auth.docker.io/token",service="registry.docker.io",scope="repository:${mRepo[1]}:pull"`,
+          'WWW-Authenticate': `Bearer realm="${origin}/v2/auth",service="registry.docker.io",scope="repository:${mRepo[1]}:pull"`,
         },
       });
     }
@@ -388,6 +394,27 @@ export default {
     }
     if (isBlockedPath(pathname)) {
       return new Response('Forbidden\n', { status: 403 });
+    }
+
+    // —— Docker v2 ping：无凭据时必须返回 401 挑战 ——
+    // daemon 只在 ping 响应中学习认证方式；若 ping 返回 200，daemon 认为
+    // 无需认证，后续 manifest 的 401 会被当作终态错误（不会去取 token）。
+    if (pathname === '/v2/' && !request.headers.has('Authorization')) {
+      const origin = new URL(request.url).origin;
+      return new Response('{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}', {
+        status: 401,
+        headers: {
+          'Content-Type': 'application/json',
+          'Docker-Distribution-Api-Version': 'registry/2.0',
+          'WWW-Authenticate': `Bearer realm="${origin}/v2/auth",service="registry.docker.io"`,
+        },
+      });
+    }
+
+    // —— Docker 认证端点：401 挑战的 realm 指向 /v2/auth ——
+    // daemon 会追加 ?service=...&scope=...（可能带 Basic 凭据），转发给 auth.docker.io
+    if (pathname === '/v2/auth') {
+      return proxyWithAuth('https://auth.docker.io/token' + (search || ''), request, true);
     }
 
     // —— Docker 路径 ——
