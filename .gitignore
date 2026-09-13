@@ -1,0 +1,10 @@
+# Wrangler 本地状态
+.wrangler/
+
+# 调试临时文件
+*.tmp
+*.log
+
+# 系统文件
+Thumbs.db
+.DS_Store

@@ -1,4 +1,2 @@
 User-agent: *
-Allow: /
-
-Sitemap: https://mirrors.decodeaz.online/sitemap.xml
+Disallow: /

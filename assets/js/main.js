@@ -30,7 +30,7 @@ function applyDomain() {
     // 跳过 script / style
     if (node.tagName === 'SCRIPT' || node.tagName === 'STYLE') return;
 
-    // 元素属性（canonical / og:url / og:image 等）
+    // 元素属性中的占位域名
     for (var i = 0; i < node.attributes.length; i++) {
       var attr = node.attributes[i];
       if (attr.value.indexOf(placeholder) !== -1) {
@@ -44,13 +44,6 @@ function applyDomain() {
 
   walk(document.head);
   walk(document.body);
-
-  // JSON-LD 中的 url（script 节点不进入上面的遍历，单独处理）
-  document.querySelectorAll('script[type="application/ld+json"]').forEach(function (s) {
-    if (s.textContent.indexOf(placeholder) !== -1) {
-      s.textContent = swap(s.textContent);
-    }
-  });
 }
 
 /**

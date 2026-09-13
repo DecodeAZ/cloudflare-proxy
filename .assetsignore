@@ -1,5 +1,17 @@
+# Wrangler / Worker 入口（不作为静态资产上传）
 _worker.js
+wrangler.jsonc
+
+# Git 与本地状态
 .git
+.gitignore
 .wrangler
 .github
+
+# 项目文档（无需通过站点公开）
+AGENTS.md
+README.md
+
+# 调试临时文件
 *.tmp
+*.log

@@ -13,6 +13,7 @@ gh.html             GitHub acceleration page (URL generator, usage examples)
 docker.html         Docker acceleration page (OS-specific config tabs)
 docs.html           Deployment guide (5-step Cloudflare Pages setup)
 assets/css/style.css  Shared styles (animations, keyframes, reduced-motion)
+assets/js/layout.js   Shared layout (tailwind.config, navbar, footer — injected on DOM ready)
 assets/js/main.js     Shared JS (tabs, copy buttons, auto-init on DOMContentLoaded)
 assets/js/gh.js       GitHub page URL generator logic
 assets/js/docker.js   Docker page OS tab switcher
@@ -22,11 +23,12 @@ assets/icons/         Reserved for icon SVGs (currently empty)
 ## Architecture notes
 
 - **No build tooling.** Open any `.html` directly in a browser. No `package.json`, no `npm`.
-- **Tailwind via CDN.** Every page loads `https://cdn.tailwindcss.com` and configures a custom `brand` color palette inline (`tailwind.config` block). Do not add Tailwind CLI or PostCSS unless the project switches away from CDN.
+- **Tailwind via CDN.** Every page loads `https://cdn.tailwindcss.com` followed by `assets/js/layout.js`, which sets the custom `brand` color palette via `tailwind.config`. Do not add Tailwind CLI or PostCSS unless the project switches away from CDN.
 - **Fonts from Google Fonts CDN.** IBM Plex Sans (display) + JetBrains Mono (code). Linked via `<link>` in each `<head>`.
 - **All icons are inline SVGs** (Lucide-style) — no icon library dependency.
 - **Vanilla JS only.** No framework.
-- **CSS/JS are now external.** Shared styles in `assets/css/style.css`, shared JS in `assets/js/main.js`. Each page also loads its own page-specific JS. When making changes to nav/footer/styling, update all four HTML files (content is still duplicated per page; only the shared wiring was extracted).
+- **Shared layout is JS-injected.** `assets/js/layout.js` renders the navbar and footer on DOM ready; nav active state is derived from `location.pathname`. Each page's HTML contains only page-specific content. When adding a page, add its entry to `NAV_LINKS` in `layout.js` (nav/footer/styling then update everywhere automatically).
+- **No SEO/crawler footprint.** robots.txt disallows all crawlers, every page carries `<meta name="robots" content="noindex, nofollow">`, and there is no sitemap/canonical/OG/JSON-LD markup. Do not re-add search-engine metadata.
 
 ### _worker.js routing
 
@@ -58,7 +60,7 @@ The `docker.js` tab switcher uses `docker-tab` / `docker-panel` classes (separat
 
 ### Design tokens
 
-Custom Tailwind colors (set in `tailwind.config` block on every page):
+Custom Tailwind colors (set in `assets/js/layout.js`):
 
 | Token | Value | Tailwind class |
 |-------|-------|---------------|
@@ -80,7 +82,7 @@ window.CF_PROXY = {
 };
 ```
 
-`main.js` reads this at page load and auto-replaces all instances of the `your-domain.com` placeholder (text nodes, attributes, JSON-LD) with the configured domain. No manual find-and-replace needed. `gh.js` also reads from config (falls back to `location.hostname`).
+`main.js` reads this at page load and auto-replaces all instances of the `your-domain.com` placeholder (text nodes, attributes) with the configured domain. No manual find-and-replace needed. `gh.js` also reads from config (falls back to `location.hostname`).
 
 ## Pre-delivery checks
 
